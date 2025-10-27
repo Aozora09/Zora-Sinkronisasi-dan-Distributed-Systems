@@ -1,0 +1,48 @@
+services:
+  # --- NODE RAFT (SUB-TUGAS A) ---
+  node1:
+    build:
+      context: ../
+      dockerfile: docker/Dockerfile.node
+    container_name: node1
+    ports:
+      - "8001:${INTERNAL_PORT:-8000}"
+    env_file:
+      - ../.env
+    environment:
+      - NODE_ID=node1
+      - PEERS=
+      - INTERNAL_PORT=${INTERNAL_PORT:-8000}
+    networks:
+      - raft-net
+    # CMD default dari Dockerfile (lock_manager) akan digunakan
+
+  # --- SERVER REDIS (SUB-TUGAS B) ---
+  redis-1:
+    image: "redis:7-alpine"
+    container_name: redis-1
+    command: redis-server --port 6379
+    networks:
+      - raft-net
+
+  redis-2:
+    image: "redis:7-alpine"
+    container_name: redis-2
+    command: redis-server --port 6379
+    networks:
+      - raft-net
+
+  redis-3:
+    image: "redis:7-alpine"
+    container_name: redis-3
+    command: redis-server --port 6379
+    networks:
+      - raft-net
+
+  # --- NODE CACHE (SUB-TUGAS C) ---
+
+# --- DEFINISI JARINGAN ---
+# Ini harus berada di level atas (indentasi 0), sama seperti 'services'
+networks:
+  raft-net:
+    driver: bridge
