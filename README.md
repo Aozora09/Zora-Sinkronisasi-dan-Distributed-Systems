@@ -19,7 +19,7 @@ Dokumentasi teknis lengkap dan laporan performa dapat ditemukan di dalam folder 
 * **[Dokumentasi API - OpenAPI 3.0 (docs/api_spec.yaml)](docs/api_spec.yaml)**
     * Spesifikasi OpenAPI/Swagger lengkap yang mendefinisikan semua *endpoint* HTTP untuk *service* Lock Manager, Queue, dan Cache.
 
-* **[Laporan Analisis Performa (report.pdf)](report.pdf)**
+* **[Laporan Analisis Performa (report.pdf)](report_11221019_Azhari_Rambe.pdf)**
     * Laporan PDF yang berisi *gambar diagram*, *benchmark* performa `locust`, membandingkan *throughput* dan *latency* dari skenario *single-node* vs. *distributed 3-node*.
 
 ---
