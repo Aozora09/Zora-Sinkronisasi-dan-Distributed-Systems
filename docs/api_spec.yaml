@@ -1,0 +1,271 @@
+openapi: 3.0.0
+info:
+  title: Distributed Sync System API
+  description: API untuk sistem Raft Lock Manager, Distributed Queue, dan MESI Cache.
+  version: 1.0.0
+
+servers:
+  - url: http://localhost
+    description: Server lokal
+
+tags:
+  - name: "Raft Lock Manager (Sub-tugas A)"
+    description: API untuk konsensus dan distributed lock (Port 8001-8003)
+  - name: "Distributed Queue (Sub-tugas B)"
+    description: API untuk antrian terdistribusi (Port 9101)
+  - name: "Cache Coherence (Sub-tugas C)"
+    description: API untuk cache MESI terdistribusi (Port 10001-10003)
+
+paths:
+  # =======================================================
+  # === Sub-tugas A: Raft Lock Manager
+  # =======================================================
+  /client-request:
+    post:
+      tags:
+        - "Raft Lock Manager (Sub-tugas A)"
+      summary: Mengirim perintah (lock/release) ke cluster Raft
+      description: Harus dikirim ke node Leader. Jika dikirim ke Follower, akan ditolak.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ClientRequest"
+      responses:
+        '200':
+          description: Perintah berhasil di-commit secara terdistribusi.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommitSuccess"
+        '400':
+          description: Error (misal: Bukan Leader, Deadlock terdeteksi, format salah).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /status:
+    get:
+      tags:
+        - "Raft Lock Manager (Sub-tugas A)"
+        - "Distributed Queue (Sub-tugas B)"
+        - "Cache Coherence (Sub-tugas C)"
+      summary: Mendapatkan status internal dari sebuah node (Raft, Queue, atau Cache)
+      description: Endpoint debugging serbaguna untuk semua jenis node.
+      responses:
+        '200':
+          description: Status internal node.
+          content:
+            application/json:
+              schema:
+                type: object
+                example: {"node_id": "node1", "state": "follower", "term": 1, ...}
+
+  # =======================================================
+  # === Sub-tugas B: Distributed Queue
+  # =======================================================
+  /queue/produce:
+    post:
+      tags:
+        - "Distributed Queue (Sub-tugas B)"
+      summary: Mengirim pesan ke antrian (Producer)
+      description: Menggunakan consistent hashing untuk merutekan ke node Redis yang tepat.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/QueueProduceRequest"
+      responses:
+        '200':
+          description: Pesan berhasil ditambahkan ke Redis Stream.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueueProduceResponse"
+  
+  /queue/create-group:
+    post:
+      tags:
+        - "Distributed Queue (Sub-tugas B)"
+      summary: Membuat consumer group untuk sebuah antrian
+      description: Perlu dijalankan sekali per antrian sebelum consume.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/QueueGroupRequest"
+      responses:
+        '200':
+          description: Grup berhasil dibuat.
+        '409':
+          description: Grup sudah ada (BUSYGROUP).
+
+  /queue/consume:
+    post:
+      tags:
+        - "Distributed Queue (Sub-tugas B)"
+      summary: Mengambil pesan dari antrian (Consumer)
+      description: Menggunakan Redis Consumer Group (XREADGROUP) untuk at-least-once delivery.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/QueueConsumeRequest"
+      responses:
+        '200':
+          description: Berhasil mengambil pesan atau antrian kosong.
+
+  # =======================================================
+  # === Sub-tugas C: Cache Coherence
+  # =======================================================
+  /cache/{key}:
+    get:
+      tags:
+        - "Cache Coherence (Sub-tugas C)"
+      summary: Membaca data dari cache terdistribusi (PrRd)
+      description: Memicu logika MESI. Bisa cache hit, bus read (dari rekan), atau miss (dari memori).
+      parameters:
+        - in: path
+          name: key
+          required: true
+          schema:
+            type: string
+            example: "alamat_A"
+      responses:
+        '200':
+          description: Data berhasil dibaca dari cache.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CacheEntry"
+
+    post:
+      tags:
+        - "Cache Coherence (Sub-tugas C)"
+      summary: Menulis data ke cache terdistribusi (PrWr)
+      description: Memicu 'Bus Invalidate' ke semua rekan cache lain dan set state ke 'Modified'.
+      parameters:
+        - in: path
+          name: key
+          required: true
+          schema:
+            type: string
+            example: "alamat_A"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                value:
+                  type: string
+                  example: "data_baru"
+      responses:
+        '200':
+          description: Data berhasil ditulis.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CacheEntry"
+
+# =======================================================
+# === Definisi Schema (Model Data)
+# =======================================================
+components:
+  schemas:
+    ClientRequest:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [ACQUIRE, RELEASE]
+        lock_name:
+          type: string
+        client_id:
+          type: string
+        mode:
+          type: string
+          enum: [exclusive, shared]
+      
+    CommitSuccess:
+      type: object
+      properties:
+        status:
+          type: string
+          example: "ok"
+        message:
+          type: string
+          example: "Perintah berhasil di-commit"
+
+    ErrorResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: "error"
+        message:
+          type: string
+          example: "Deadlock terdeteksi, permintaan ditolak"
+
+    QueueProduceRequest:
+      type: object
+      properties:
+        queue_name:
+          type: string
+          example: "antrian_tes"
+        message:
+          type: object
+          example: {"user": "aozora", "data": "pesan_1"}
+          
+    QueueProduceResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: "ok"
+        routed_to:
+          type: string
+          example: "redis-1"
+        message_id:
+          type: string
+          example: "1761519065004-0"
+
+    QueueGroupRequest:
+      type: object
+      properties:
+        queue_name:
+          type: string
+          example: "antrian_tes"
+        group_name:
+          type: string
+          example: "grup_pekerja"
+          
+    QueueConsumeRequest:
+      type: object
+      properties:
+        queue_name:
+          type: string
+          example: "antrian_tes"
+        group_name:
+          type: string
+          example: "grup_pekerja"
+        consumer_id:
+          type: string
+          example: "konsumen_1"
+
+    CacheEntry:
+      type: object
+      properties:
+        state:
+          type: string
+          enum: [M, E, S, I]
+          example: "M"
+        value:
+          type: string
+          example: "data_baru_diubah"
