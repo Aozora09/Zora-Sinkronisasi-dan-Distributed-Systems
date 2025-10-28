@@ -1,48 +1,179 @@
+# docker-compose.yml (Konfigurasi Single Node HTTPS untuk Lock Manager)
+# Jalankan dari folder docker/
+
 services:
   # --- NODE RAFT (SUB-TUGAS A) ---
   node1:
     build:
-      context: ../
-      dockerfile: docker/Dockerfile.node
+      context: .. # Konteks build relatif terhadap file compose ini (di folder docker/)
+      dockerfile: docker/Dockerfile.node # Path ke Dockerfile Anda
     container_name: node1
     ports:
-      - "8001:${INTERNAL_PORT:-8000}"
+      - "${NODE1_PORT:-8001}:${INTERNAL_PORT:-8000}" # Gunakan env var untuk port host
     env_file:
-      - ../.env
+      - ../.env # Path ke file .env (satu level di atas folder docker/)
     environment:
       - NODE_ID=node1
-      - PEERS=
+      - PEERS=  # <-- KOSONGKAN untuk mode single node
       - INTERNAL_PORT=${INTERNAL_PORT:-8000}
-    networks:
-      - raft-net
-    # CMD default dari Dockerfile (lock_manager) akan digunakan
-
-  # --- SERVER REDIS (SUB-TUGAS B) ---
-  redis-1:
-    image: "redis:7-alpine"
-    container_name: redis-1
-    command: redis-server --port 6379
+      # Path Sertifikat (sesuai lokasi di Dockerfile)
+      - CERT_FILE=/etc/ssl/certs/myapp/node1.crt
+      - KEY_FILE=/etc/ssl/certs/myapp/node1.key
+      - CA_FILE=/etc/ssl/certs/myapp/ca.crt
+    # Perintah default dari Dockerfile (python -m src.nodes.lock_manager) akan digunakan
     networks:
       - raft-net
 
-  redis-2:
-    image: "redis:7-alpine"
-    container_name: redis-2
-    command: redis-server --port 6379
-    networks:
-      - raft-net
+  # node2: # <-- DIKOMENTARI
+  #   build:
+  #     context: ..
+  #     dockerfile: docker/Dockerfile.node
+  #   container_name: node2
+  #   ports:
+  #     - "${NODE2_PORT:-8002}:${INTERNAL_PORT:-8000}"
+  #   env_file:
+  #     - ../.env
+  #   environment:
+  #     - NODE_ID=node2
+  #     - PEERS=node1,node3 # Tidak relevan
+  #     - INTERNAL_PORT=${INTERNAL_PORT:-8000}
+  #     - CERT_FILE=/etc/ssl/certs/myapp/node2.crt
+  #     - KEY_FILE=/etc/ssl/certs/myapp/node2.key
+  #     - CA_FILE=/etc/ssl/certs/myapp/ca.crt
+  #   command: python -m src.nodes.lock_manager
+  #   networks:
+  #     - raft-net
 
-  redis-3:
-    image: "redis:7-alpine"
-    container_name: redis-3
-    command: redis-server --port 6379
-    networks:
-      - raft-net
+  # node3: # <-- DIKOMENTARI
+  #   build:
+  #     context: ..
+  #     dockerfile: docker/Dockerfile.node
+  #   container_name: node3
+  #   ports:
+  #     - "${NODE3_PORT:-8003}:${INTERNAL_PORT:-8000}"
+  #   env_file:
+  #     - ../.env
+  #   environment:
+  #     - NODE_ID=node3
+  #     - PEERS=node1,node2 # Tidak relevan
+  #     - INTERNAL_PORT=${INTERNAL_PORT:-8000}
+  #     - CERT_FILE=/etc/ssl/certs/myapp/node3.crt
+  #     - KEY_FILE=/etc/ssl/certs/myapp/node3.key
+  #     - CA_FILE=/etc/ssl/certs/myapp/ca.crt
+  #   command: python -m src.nodes.lock_manager
+  #   networks:
+  #     - raft-net
 
-  # --- NODE CACHE (SUB-TUGAS C) ---
+  # # --- NODE ANTRIAN (SUB-TUGAS B) --- (Dikomemtari untuk fokus tes Lock)
+  # queue-node-1:
+  #   build:
+  #     context: ..
+  #     dockerfile: docker/Dockerfile.node
+  #   container_name: queue-node-1
+  #   ports:
+  #     - "${QUEUE_NODE_PORT:-9101}:${INTERNAL_PORT:-8000}"
+  #   env_file:
+  #     - ../.env
+  #   environment:
+  #     - NODE_ID=queue-node-1
+  #     - INTERNAL_PORT=${INTERNAL_PORT:-8000}
+  #     - REDIS_NODES=redis-1,redis-2,redis-3 # Diperlukan oleh queue_node
+  #     - CERT_FILE=/etc/ssl/certs/myapp/queue-node-1.crt
+  #     - KEY_FILE=/etc/ssl/certs/myapp/queue-node-1.key
+  #     - CA_FILE=/etc/ssl/certs/myapp/ca.crt
+  #   command: python -m src.nodes.queue_node
+  #   networks:
+  #     - raft-net
+  #   depends_on: # Pastikan Redis siap sebelum queue node mulai
+  #     - redis-1
+  #     - redis-2
+  #     - redis-3
+
+  # # --- SERVER REDIS (SUB-TUGAS B) --- (Dikomemtari untuk fokus tes Lock)
+  # redis-1:
+  #   image: "redis:7-alpine"
+  #   container_name: redis-1
+  #   command: redis-server --port 6379
+  #   networks:
+  #     - raft-net
+
+  # redis-2:
+  #   image: "redis:7-alpine"
+  #   container_name: redis-2
+  #   command: redis-server --port 6379
+  #   networks:
+  #     - raft-net
+
+  # redis-3:
+  #   image: "redis:7-alpine"
+  #   container_name: redis-3
+  #   command: redis-server --port 6379
+  #   networks:
+  #     - raft-net
+
+  # # --- NODE CACHE (SUB-TUGAS C) --- (Dikomemtari untuk fokus tes Lock)
+  # cache-node-1:
+  #   build:
+  #     context: ..
+  #     dockerfile: docker/Dockerfile.node
+  #   container_name: cache-node-1
+  #   ports:
+  #     - "${CACHE1_PORT:-10001}:${INTERNAL_PORT:-8000}"
+  #   env_file:
+  #     - ../.env
+  #   environment:
+  #     - NODE_ID=cache-node-1
+  #     - INTERNAL_PORT=${INTERNAL_PORT:-8000}
+  #     - PEERS=cache-node-2,cache-node-3 # Peers untuk cache coherence
+  #     - CERT_FILE=/etc/ssl/certs/myapp/cache-node-1.crt
+  #     - KEY_FILE=/etc/ssl/certs/myapp/cache-node-1.key
+  #     - CA_FILE=/etc/ssl/certs/myapp/ca.crt
+  #   command: python -m src.nodes.cache_node
+  #   networks:
+  #     - raft-net
+
+  # cache-node-2:
+  #   build:
+  #     context: ..
+  #     dockerfile: docker/Dockerfile.node
+  #   container_name: cache-node-2
+  #   ports:
+  #     - "${CACHE2_PORT:-10002}:${INTERNAL_PORT:-8000}"
+  #   env_file:
+  #     - ../.env
+  #   environment:
+  #     - NODE_ID=cache-node-2
+  #     - INTERNAL_PORT=${INTERNAL_PORT:-8000}
+  #     - PEERS=cache-node-1,cache-node-3
+  #     - CERT_FILE=/etc/ssl/certs/myapp/cache-node-2.crt
+  #     - KEY_FILE=/etc/ssl/certs/myapp/cache-node-2.key
+  #     - CA_FILE=/etc/ssl/certs/myapp/ca.crt
+  #   command: python -m src.nodes.cache_node
+  #   networks:
+  #     - raft-net
+
+  # cache-node-3:
+  #   build:
+  #     context: ..
+  #     dockerfile: docker/Dockerfile.node
+  #   container_name: cache-node-3
+  #   ports:
+  #     - "${CACHE3_PORT:-10003}:${INTERNAL_PORT:-8000}"
+  #   env_file:
+  #     - ../.env
+  #   environment:
+  #     - NODE_ID=cache-node-3
+  #     - INTERNAL_PORT=${INTERNAL_PORT:-8000}
+  #     - PEERS=cache-node-1,cache-node-2
+  #     - CERT_FILE=/etc/ssl/certs/myapp/cache-node-3.crt
+  #     - KEY_FILE=/etc/ssl/certs/myapp/cache-node-3.key
+  #     - CA_FILE=/etc/ssl/certs/myapp/ca.crt
+  #   command: python -m src.nodes.cache_node
+  #   networks:
+  #     - raft-net
 
 # --- DEFINISI JARINGAN ---
-# Ini harus berada di level atas (indentasi 0), sama seperti 'services'
 networks:
-  raft-net:
+  raft-net: # Nama network tetap sama
     driver: bridge
+

@@ -2,3 +2,5 @@ aiohttp
 aiohttp-retry
 redis
 aioredis
+pytest
+pytest-asyncio

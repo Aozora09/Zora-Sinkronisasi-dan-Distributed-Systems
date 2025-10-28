@@ -1,6 +1,6 @@
 # Arsitektur Sistem Sinkronisasi Terdistribusi
 
-Sistem ini dirancang sebagai arsitektur _microservice_ yang berjalan di dalam satu jaringan Docker (`raft-net`). Setiap _service_ utama (Lock Manager, Queue, Cache) berjalan sebagai kontainer independen, mengimplementasikan algoritma terdistribusi yang berbeda untuk memenuhi persyaratan tugas.
+Sistem ini dirancang sebagai arsitektur _microservice_ yang berjalan di dalam satu jaringan Docker (`raft-net`). Setiap _service_ utama (Lock Manager, Queue, Cache) berjalan sebagai kontainer independen, mengimplementasikan algoritma terdistribusi yang berbeda untuk memenuhi persyaratan tugas. **Komunikasi antar _service_ Python diamankan menggunakan HTTPS/TLS.**
 
 ---
 
@@ -95,51 +95,63 @@ end
 
 ---
 
-## Penjelasan Algoritma
+## Penjelasan Algoritma & Implementasi
 
-Sistem ini terdiri dari tiga _microservice_ utama yang masing-masing mengimplementasikan algoritma sistem terdistribusi yang berbeda untuk memenuhi _core requirements_.
+Sistem ini terdiri dari tiga _microservice_ utama yang masing-masing mengimplementasikan algoritma sistem terdistribusi yang berbeda, ditambah lapisan keamanan dasar.
 
 ### 1. Sub-tugas A: Raft Distributed Lock Manager
 
-_Service_ ini adalah _state machine_ terdistribusi yang mengelola _shared_ dan _exclusive lock_. [cite_start]Untuk memastikan semua node (replika) setuju pada _state_ (status) _lock_ yang sama, saya mengimplementasikan algoritma konsensus **Raft** dari awal, berdasarkan paper "In Search of an Understandable Consensus Algorithm" [cite: 601-1640].
+_Service_ ini adalah _state machine_ terdistribusi yang mengelola _shared_ dan _exclusive lock_. Untuk memastikan semua node (replika) setuju pada _state_ (status) _lock_ yang sama, saya mengimplementasikan algoritma konsensus **Raft** dari awal, berdasarkan paper "In Search of an Understandable Consensus Algorithm" [cite: 601-1640].
 
-[cite_start]Logika Raft memecah masalah konsensus menjadi tiga bagian[cite: 740]:
+Logika Raft memecah masalah konsensus menjadi tiga bagian:
 
-1.  **Leader Election (Pemilihan Pemimpin):** Sistem dimulai dengan semua node sebagai `Follower`. [cite_start]Setiap `Follower` memiliki _timer_ pemilihan acak (antara 5-10 detik) [cite: 911-912]. [cite_start]Jika seorang `Follower` tidak menerima _heartbeat_ dari `Leader` sebelum _timer_-nya habis, ia akan berubah menjadi `Candidate` [cite: 896-897], menaikkan _term_ (periode), dan meminta suara (`RequestVote` RPC) dari _peer_ lain. [cite_start]Jika ia menerima suara dari mayoritas (misalnya, 2 dari 3 node), ia menjadi `Leader`[cite: 901].
+1.  **Leader Election:** Sistem dimulai dengan semua node sebagai `Follower`. Setiap `Follower` memiliki _timer_ pemilihan acak [cite: 911-912]. Jika tidak menerima _heartbeat_ (`AppendEntries` kosong) dari `Leader` sebelum _timer_-nya habis, ia menjadi `Candidate` [cite: 896-897], menaikkan _term_, dan meminta suara (`RequestVote` RPC) dari _peer_. Jika ia menerima suara dari mayoritas, ia menjadi `Leader`.
+2.  **Log Replication:** Hanya `Leader` yang menangani permintaan _client_. Perintah ditambahkan ke log `Leader` dan direplikasi ke _Follower_ melalui `AppendEntries` RPC.
+3.  **Safety & Commit:** Entri log dianggap **committed** setelah direplikasi ke mayoritas _server_. **Election Restriction** memastikan `Leader` baru memiliki semua entri yang sudah di-_commit_ [cite: 1083, 1086-1087].
 
-2.  [cite_start]**Log Replication (Replikasi Log):** `Leader` adalah satu-satunya yang bertanggung jawab untuk menangani permintaan _client_[cite: 736]. [cite_start]Ketika `Leader` menerima perintah (misal: `ACQUIRE_EXCLUSIVE lock_A user1`), ia menambahkannya ke log-nya sendiri [cite: 959] [cite_start]dan mengirimkan `AppendEntries` RPC ke semua _Follower_ untuk memaksa log mereka sama[cite: 959, 981].
-
-3.  [cite_start]**Safety & Commit:** Sebuah entri log dianggap **committed** (aman untuk dieksekusi) hanya setelah berhasil direplikasi ke mayoritas _server_[cite: 968]. [cite_start]Untuk mencegah data yang salah, Raft memberlakukan **Election Restriction**: seorang _Candidate_ tidak bisa memenangkan pemilu kecuali log-nya "setidaknya sama terbarunya" dengan log mayoritas _cluster_ [cite: 1083, 1086-1087]. Ini menjamin bahwa `Leader` baru selalu memiliki semua entri yang sudah di-_commit_.
-
-_State machine_ di atas Raft kemudian menerapkan `ACQUIRE` dan `RELEASE` secara berurutan, sambil melacak "grafik tunggu" (wait-for-graph) untuk mendeteksi dan menolak transaksi yang akan menyebabkan _deadlock_.
+_State machine_ kemudian menerapkan log yang sudah di-_commit_ secara berurutan, mengelola status _lock_ (`exclusive`/`shared`, `owners`) dan antrian tunggu (`wait_queue`). **Deteksi Deadlock** diimplementasikan di `Leader` sebelum menambahkan perintah `ACQUIRE` ke log, menggunakan analisis _wait-for-graph_ untuk menolak permintaan yang akan menyebabkan siklus tunggu.
 
 ### 2. Sub-tugas B: Distributed Queue (Consistent Hashing)
 
-_Service_ ini adalah _router_ antrian cerdas yang menggunakan **Consistent Hashing** untuk mempartisi antrian (`queue_name`) ke beberapa _node_ Redis.
+_Service_ ini berfungsi sebagai _router_ yang menerima _request_ API (produce/consume) dan meneruskannya ke _node_ Redis yang sesuai berdasarkan **Consistent Hashing**.
 
-1.  **Konsep "Hash Ring":** Bayangkan sebuah cincin atau lingkaran. Ketiga _node_ Redis kita (`redis-1`, `redis-2`, `redis-3`) ditempatkan di beberapa titik di sepanjang cincin ini (menggunakan _virtual replicas_ untuk distribusi yang lebih baik).
-2.  **Perutean Pesan:** Ketika `queue-node-1` menerima permintaan untuk mengirim pesan ke `"antrian_A"`, ia akan menghitung _hash_ dari `"antrian_A"`. Ia kemudian menempatkan _hash_ itu di cincin dan "berjalan" searah jarum jam hingga menemukan _node_ Redis pertama (misalnya `redis-2`). Semua pesan untuk `"antrian_A"` akan dirutekan ke `redis-2`. Pesan untuk `"antrian_B"` mungkin akan di-_hash_ ke lokasi lain dan mendarat di `redis-3`.
-3.  **Toleransi Kegagalan:** Keuntungan dari _consistent hashing_ adalah jika `redis-2` mati, hanya kunci-kunci yang dimilikinya yang akan dipetakan ulang ke _node_ berikutnya di cincin (`redis-3`), tanpa mengganggu kunci-kunci yang sudah ada di `redis-1`.
-4.  **At-Least-Once Delivery:** Untuk memenuhi syarat persistensi dan jaminan pengiriman, saya menggunakan **Redis Streams**. _Producer_ menggunakan `XADD` untuk menambah pesan. _Consumer_ menggunakan `XGROUP CREATE` dan `XREADGROUP` untuk membaca pesan. Ini memastikan bahwa jika _consumer_ mati sebelum mengkonfirmasi (`XACK`) sebuah pesan, pesan itu tetap ada dan dapat diproses oleh _consumer_ lain.
+1.  **"Hash Ring":** Ketiga _node_ Redis (`redis-1` hingga `redis-3`) dipetakan ke beberapa titik pada sebuah "cincin" virtual menggunakan _hash_ dari nama _node_ ditambah _suffix replica_.
+2.  **Perutean Pesan:** Saat _request_ `produce` untuk `queue_name` diterima, _hash_ dari `queue_name` dihitung. _Node_ Redis pertama yang ditemukan searah jarum jam dari posisi _hash_ tersebut di cincin menjadi target penyimpanan pesan.
+3.  **Toleransi Kegagalan (Redis):** Jika satu _node_ Redis gagal, _consistent hashing_ memastikan hanya kunci yang sebelumnya dipetakan ke _node_ tersebut yang akan didistribusikan ulang ke _node_ berikutnya di cincin, meminimalkan gangguan.
+4.  **At-Least-Once Delivery & Persistence:** Penggunaan **Redis Streams** (`XADD`, `XGROUP CREATE`, `XREADGROUP`) oleh _service_ ini menyediakan persistensi pesan (ditangani oleh Redis) dan mekanisme dasar untuk jaminan pengiriman setidaknya sekali melalui _consumer groups_.
 
 ### 3. Sub-tugas C: Cache Coherence (MESI)
 
-_Service_ ini mensimulasikan sekelompok _cache_ CPU terdistribusi yang menjaga koherensi data menggunakan protokol **MESI**.
+_Service_ ini mensimulasikan cluster _cache_ terdistribusi (3 _node_) yang menjaga koherensi data menggunakan variasi protokol **MESI**.
 
-saya mengimplementasikan 3 _node_ _cache_ (`cache-node-1`, `cache-node-2`, `cache-node-3`) yang saling berkomunikasi melalui "bus" internal (menggunakan _endpoint_ HTTP `/bus/read` dan `/bus/invalidate`).
+Setiap _node_ (`cache-node-1` hingga `cache-node-3`) menyimpan data dalam _cache_ LRU lokal. Setiap entri _cache_ memiliki _state_: **M**odified, **E**xclusive, **S**hared, atau **I**nvalid. Komunikasi antar _node_ untuk menjaga koherensi terjadi melalui "bus" internal (HTTPS `POST /bus/invalidate/{key}` dan `GET /bus/read/{key}`).
 
-Setiap baris _cache_ (misal: `"alamat_A"`) di setiap _node_ dapat memiliki satu dari empat _state_:
+**Alur Kerja Utama:**
 
-1.  **M (Modified):** _Cache_ ini memiliki data terbaru; data di "memori" sudah basi.
-2.  **E (Exclusive):** _Cache_ ini adalah _satu-satunya_ yang memiliki salinan data ini, dan data ini bersih (sama dengan memori).
-3.  **S (Shared):** _Cache_ ini memiliki data, dan _setidaknya satu node cache lain_ juga memilikinya.
-4.  **I (Invalid):** Salinan data di _cache_ ini sudah basi dan tidak boleh digunakan.
+- **PrRd (Processor Read):** Saat `GET /cache/{key}` diterima:
+  - Jika _hit_ lokal (state M, E, S): Data dikembalikan.
+  - Jika _miss_ lokal atau state I: Node mengirim `BusRd` (via HTTPS) ke semua _peer_.
+    - Jika _peer_ merespons dengan data: _Peer_ pengirim mengubah state-nya ke S. Node penerima memuat data dengan state S.
+    - Jika tidak ada _peer_ yang merespons: Node mengambil data dari "memori utama" (simulasi) dan memuatnya dengan state E.
+- **PrWr (Processor Write):** Saat `POST /cache/{key}` diterima:
+  - Node mengirim `BusInvalidate` (via HTTPS) ke semua _peer_.
+  - Node menulis data baru ke _cache_ lokal dan menyetel state ke M.
+- **BusRd Response:** Node yang menerima `BusRd` dan memiliki data valid (M, E, S) akan mengirimkan data kembali dan mengubah state lokalnya ke S.
+- **BusInvalidate Response:** Node yang menerima `BusInvalidate` akan mengubah state kunci yang relevan menjadi I.
+- **LRU Replacement:** Jika _cache_ penuh saat data baru perlu dimasukkan, entri yang paling lama tidak diakses akan dikeluarkan.
 
-**Skenario Alur Kerja (Sesuai Pengujian):**
+### 4. Keamanan (Fitur Bonus)
 
-1.  **Cache Miss (Read):** `cache-node-1` membaca `"alamat_A"`. Terjadi _cache miss_. Node mengambil data dari "memori utama" (simulasi) dan menyetel _state_-nya ke **E (Exclusive)**.
-2.  **Read by Other (E -> S):** `cache-node-2` membaca `"alamat_A"`. Terjadi _cache miss_. Ia mengirim `BusRd` (Bus Read) ke semua _peer_. `cache-node-1` menerima `BusRd`, mengirimkan datanya, dan mengubah _state_-nya dari 'E' menjadi **S (Shared)**. `cache-node-2` memuat data dengan _state_ **S (Shared)**.
-3.  **Write (S -> M & Invalidate):** `cache-node-1` menulis data baru ke `"alamat_A"`. Ia segera mengirimkan `BusInvalidate` ke semua _peer_ dan mengubah _state_ lokalnya menjadi **M (Modified)**.
-4.  **Invalidation:** `cache-node-2` menerima `BusInvalidate` dan mengubah _state_ `"alamat_A"` miliknya menjadi **I (Invalid)**, memastikan ia tidak akan membaca data yang basi.
+Lapisan keamanan dasar telah ditambahkan untuk meningkatkan robustitas sistem:
 
-Untuk _cache replacement_, saya menggunakan kebijakan **LRU (Least Recently Used)** yang diimplementasikan menggunakan `OrderedDict` dari Python.
+1.  **Enkripsi Komunikasi (HTTPS/TLS):**
+
+    - Seluruh komunikasi berbasis HTTP antar _node_ Python (Raft RPC, Cache Bus) dan antara _client_ eksternal ke API _endpoint_ kini dienkripsi menggunakan TLS (HTTPS).
+    - Sertifikat X.509 _self-signed_ dibuat untuk setiap _node_ aplikasi, ditandatangani oleh Certificate Authority (CA) lokal yang juga dibuat untuk keperluan pengujian.
+    - Server `aiohttp` dikonfigurasi untuk menggunakan sertifikat ini. _Client_ `aiohttp` dikonfigurasi untuk memvalidasi sertifikat _server_ menggunakan CA lokal, memastikan koneksi terenkripsi dan terotentikasi (dasar).
+
+2.  **Audit Logging:**
+    - Detail _logging_ ditingkatkan secara signifikan di semua _handler_ API dan fungsi internal.
+    - Informasi penting seperti IP sumber _request_, _timestamp_, aksi yang diminta, parameter kunci, hasil operasi (termasuk _error_), dan target _routing_ (jika relevan) dicatat untuk keperluan _tracing_ dan _debugging_.
+
+Implementasi keamanan ini memberikan perlindungan dasar terhadap penyadapan (_eavesdropping_) dan modifikasi data saat transit antar _service_, serta meningkatkan kemampuan observasi sistem.

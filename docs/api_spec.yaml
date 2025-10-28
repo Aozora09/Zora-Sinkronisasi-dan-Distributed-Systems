@@ -1,20 +1,22 @@
 openapi: 3.0.0
 info:
   title: Distributed Sync System API
-  description: API untuk sistem Raft Lock Manager, Distributed Queue, dan MESI Cache.
-  version: 1.0.0
+  description: |-
+    API untuk sistem Raft Lock Manager, Distributed Queue, dan MESI Cache.
+    Semua endpoint diakses melalui HTTPS. Komunikasi antar node internal juga menggunakan HTTPS/TLS.
+  version: 1.0.1 # Naikkan versi minor karena ada perubahan (HTTPS)
 
 servers:
-  - url: http://localhost
-    description: Server lokal
+  - url: https://localhost # <-- Ganti ke HTTPS
+    description: Server lokal (akses melalui port mapping Docker)
 
 tags:
   - name: "Raft Lock Manager (Sub-tugas A)"
-    description: API untuk konsensus dan distributed lock (Port 8001-8003)
+    description: API untuk konsensus dan distributed lock (Port 8001-8003 via HTTPS)
   - name: "Distributed Queue (Sub-tugas B)"
-    description: API untuk antrian terdistribusi (Port 9101)
+    description: API untuk antrian terdistribusi (Port 9101 via HTTPS)
   - name: "Cache Coherence (Sub-tugas C)"
-    description: API untuk cache MESI terdistribusi (Port 10001-10003)
+    description: API untuk cache MESI terdistribusi (Port 10001-10003 via HTTPS)
 
 paths:
   # =======================================================
@@ -24,8 +26,8 @@ paths:
     post:
       tags:
         - "Raft Lock Manager (Sub-tugas A)"
-      summary: Mengirim perintah (lock/release) ke cluster Raft
-      description: Harus dikirim ke node Leader. Jika dikirim ke Follower, akan ditolak.
+      summary: Mengirim perintah (lock/release) ke cluster Raft (via HTTPS)
+      description: Harus dikirim ke node Leader. Jika dikirim ke Follower, akan ditolak (HTTP 400).
       requestBody:
         required: true
         content:
@@ -45,14 +47,21 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        '503':
+           description: Service Unavailable (misal: Timeout menunggu commit).
+           content:
+             application/json:
+               schema:
+                 $ref: "#/components/schemas/ErrorResponse" # Bisa pakai skema error yg sama
 
+  # Endpoint /status tetap sama (GET), tapi via HTTPS
   /status:
     get:
       tags:
         - "Raft Lock Manager (Sub-tugas A)"
         - "Distributed Queue (Sub-tugas B)"
         - "Cache Coherence (Sub-tugas C)"
-      summary: Mendapatkan status internal dari sebuah node (Raft, Queue, atau Cache)
+      summary: Mendapatkan status internal node (Raft, Queue, atau Cache) via HTTPS
       description: Endpoint debugging serbaguna untuk semua jenis node.
       responses:
         '200':
@@ -61,7 +70,12 @@ paths:
             application/json:
               schema:
                 type: object
-                example: {"node_id": "node1", "state": "follower", "term": 1, ...}
+                # Contoh diperbarui untuk mencerminkan output node Raft/Cache/Queue
+                example:
+                  oneOf:
+                    - $ref: "#/components/schemas/RaftStatusExample"
+                    - $ref: "#/components/schemas/QueueStatusExample"
+                    - $ref: "#/components/schemas/CacheStatusExample"
 
   # =======================================================
   # === Sub-tugas B: Distributed Queue
@@ -70,7 +84,7 @@ paths:
     post:
       tags:
         - "Distributed Queue (Sub-tugas B)"
-      summary: Mengirim pesan ke antrian (Producer)
+      summary: Mengirim pesan ke antrian (Producer) via HTTPS
       description: Menggunakan consistent hashing untuk merutekan ke node Redis yang tepat.
       requestBody:
         required: true
@@ -85,13 +99,25 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/QueueProduceResponse"
-  
+        '400':
+          description: Format request salah.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        '503':
+          description: Service Unavailable (Node Redis target tidak tersedia).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
   /queue/create-group:
     post:
       tags:
         - "Distributed Queue (Sub-tugas B)"
-      summary: Membuat consumer group untuk sebuah antrian
-      description: Perlu dijalankan sekali per antrian sebelum consume.
+      summary: Membuat consumer group untuk sebuah antrian via HTTPS
+      description: Perlu dijalankan sekali per antrian sebelum consume. Idempotent (mengembalikan 200 jika sudah ada).
       requestBody:
         required: true
         content:
@@ -100,16 +126,37 @@ paths:
               $ref: "#/components/schemas/QueueGroupRequest"
       responses:
         '200':
-          description: Grup berhasil dibuat.
-        '409':
-          description: Grup sudah ada (BUSYGROUP).
+          description: Grup berhasil dibuat atau sudah ada.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleSuccess"
+        '400':
+          description: Format request salah.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        '404': # Sebenarnya Redis error, tapi bisa dipetakan ke 404 jika stream tidak ada? Atau 500/503.
+           description: Stream (antrian) tidak ditemukan (jika mkstream=False).
+           content:
+             application/json:
+               schema:
+                 $ref: "#/components/schemas/SimpleError"
+        '503':
+          description: Service Unavailable (Node Redis target tidak tersedia).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
 
   /queue/consume:
     post:
       tags:
         - "Distributed Queue (Sub-tugas B)"
-      summary: Mengambil pesan dari antrian (Consumer)
-      description: Menggunakan Redis Consumer Group (XREADGROUP) untuk at-least-once delivery.
+      summary: Mengambil pesan dari antrian (Consumer) via HTTPS
+      description: Menggunakan Redis Consumer Group (XREADGROUP) dengan block timeout.
       requestBody:
         required: true
         content:
@@ -119,6 +166,28 @@ paths:
       responses:
         '200':
           description: Berhasil mengambil pesan atau antrian kosong.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueueConsumeResponse" # Skema baru
+        '400':
+          description: Format request salah.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        '404':
+           description: Antrian atau Grup tidak ditemukan.
+           content:
+             application/json:
+               schema:
+                 $ref: "#/components/schemas/SimpleError"
+        '503':
+          description: Service Unavailable (Node Redis target tidak tersedia).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
 
   # =======================================================
   # === Sub-tugas C: Cache Coherence
@@ -127,15 +196,13 @@ paths:
     get:
       tags:
         - "Cache Coherence (Sub-tugas C)"
-      summary: Membaca data dari cache terdistribusi (PrRd)
+      summary: Membaca data dari cache terdistribusi (PrRd) via HTTPS
       description: Memicu logika MESI. Bisa cache hit, bus read (dari rekan), atau miss (dari memori).
       parameters:
         - in: path
           name: key
           required: true
-          schema:
-            type: string
-            example: "alamat_A"
+          schema: { type: string, example: "alamat_A" }
       responses:
         '200':
           description: Data berhasil dibaca dari cache.
@@ -147,25 +214,22 @@ paths:
     post:
       tags:
         - "Cache Coherence (Sub-tugas C)"
-      summary: Menulis data ke cache terdistribusi (PrWr)
+      summary: Menulis data ke cache terdistribusi (PrWr) via HTTPS
       description: Memicu 'Bus Invalidate' ke semua rekan cache lain dan set state ke 'Modified'.
       parameters:
         - in: path
           name: key
           required: true
-          schema:
-            type: string
-            example: "alamat_A"
+          schema: { type: string, example: "alamat_A" }
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
+              required: [value]
               properties:
-                value:
-                  type: string
-                  example: "data_baru"
+                value: { type: string, example: "data_baru" }
       responses:
         '200':
           description: Data berhasil ditulis.
@@ -173,99 +237,151 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/CacheEntry"
+        '400':
+           description: Format request salah ('value' tidak ada).
+           content:
+             application/json:
+               schema:
+                 $ref: "#/components/schemas/SimpleError"
 
 # =======================================================
 # === Definisi Schema (Model Data)
 # =======================================================
 components:
   schemas:
-    ClientRequest:
+    # --- Skema Umum ---
+    SimpleSuccess:
       type: object
       properties:
-        type:
-          type: string
-          enum: [ACQUIRE, RELEASE]
-        lock_name:
-          type: string
-        client_id:
-          type: string
-        mode:
-          type: string
-          enum: [exclusive, shared]
-      
+        status: { type: string, example: "ok" }
+        message: { type: string, example: "Operasi berhasil" }
+    SimpleError:
+      type: object
+      properties:
+        error: { type: string, example: "Pesan error detail" }
+
+    # --- Skema Lock Manager ---
+    ClientRequest:
+      type: object
+      required: [type, lock_name, client_id]
+      properties:
+        type: { type: string, enum: [ACQUIRE, RELEASE] }
+        lock_name: { type: string, example: "mylock123" }
+        client_id: { type: string, example: "client_abc" }
+        mode: { type: string, enum: [exclusive, shared], default: "exclusive" }
+
     CommitSuccess:
       type: object
       properties:
-        status:
-          type: string
-          example: "ok"
-        message:
-          type: string
-          example: "Perintah berhasil di-commit"
+        status: { type: string, example: "ok" }
+        message: { type: string, example: "Perintah berhasil di-commit" }
 
-    ErrorResponse:
+    ErrorResponse: # Digunakan untuk error Raft yang lebih spesifik
       type: object
       properties:
-        status:
-          type: string
-          example: "error"
-        message:
-          type: string
-          example: "Deadlock terdeteksi, permintaan ditolak"
+        status: { type: string, example: "error" }
+        message: { type: string, example: "Deadlock terdeteksi, permintaan ditolak" }
+        leader_id: { type: string, nullable: true, example: "node2" } # Jika error "Bukan Leader"
+        leader_hint: { type: string, nullable: true, example: "https://node2:8000"} # Jika error "Bukan Leader"
 
+    RaftStatusExample:
+      type: object
+      properties:
+        node_id: { type: string, example: "node1" }
+        state: { type: string, enum: [leader, follower, candidate], example: "leader" }
+        term: { type: integer, example: 2 }
+        leader_id: { type: string, example: "node1"}
+        # ... tambahkan field status relevan lainnya
+      required: [node_id, state, term]
+
+    # --- Skema Queue ---
     QueueProduceRequest:
       type: object
+      required: [queue_name, message]
       properties:
-        queue_name:
-          type: string
-          example: "antrian_tes"
+        queue_name: { type: string, example: "antrian_tes" }
         message:
           type: object
+          description: Harus berupa dictionary key-value (keduanya string).
+          additionalProperties: { type: string }
           example: {"user": "aozora", "data": "pesan_1"}
-          
+
     QueueProduceResponse:
       type: object
       properties:
-        status:
-          type: string
-          example: "ok"
-        routed_to:
-          type: string
-          example: "redis-1"
-        message_id:
-          type: string
-          example: "1761519065004-0"
+        status: { type: string, example: "ok" }
+        routed_to: { type: string, example: "redis-1" }
+        message_id: { type: string, example: "1761519065004-0" }
 
     QueueGroupRequest:
       type: object
+      required: [queue_name]
       properties:
-        queue_name:
-          type: string
-          example: "antrian_tes"
-        group_name:
-          type: string
-          example: "grup_pekerja"
-          
+        queue_name: { type: string, example: "antrian_tes" }
+        group_name: { type: string, default: "default_group", example: "grup_pekerja" }
+
     QueueConsumeRequest:
       type: object
+      required: [queue_name, consumer_id]
       properties:
-        queue_name:
-          type: string
-          example: "antrian_tes"
-        group_name:
-          type: string
-          example: "grup_pekerja"
-        consumer_id:
-          type: string
-          example: "konsumen_1"
+        queue_name: { type: string, example: "antrian_tes" }
+        group_name: { type: string, default: "default_group", example: "grup_pekerja" }
+        consumer_id: { type: string, example: "konsumen_1" }
 
+    QueueConsumeResponse:
+      type: object
+      properties:
+        status: { type: string, example: "ok", enum: [ok, empty] }
+        message: { type: string, nullable: true, example: "Tidak ada pesan baru"} # Jika status='empty'
+        messages: # Jika status='ok'
+          type: array
+          items:
+            type: object
+            properties:
+              queue: { type: string, example: "antrian_tes" }
+              message_id: { type: string, example: "1761519065004-0"}
+              message:
+                type: object
+                additionalProperties: { type: string }
+                example: {"user": "aozora", "data": "pesan_1"}
+
+    QueueStatusExample:
+       type: object
+       properties:
+         node_id: { type: string, example: "queue-node-1"}
+         type: { type: string, example: "queue_node"}
+         redis_nodes_configured: { type: array, items: { type: string }, example: ["redis-1", "redis-2"] }
+         redis_pools_connected: { type: array, items: { type: string }, example: ["redis-1"] }
+       required: [node_id, type]
+
+    # --- Skema Cache ---
     CacheEntry:
       type: object
       properties:
-        state:
-          type: string
-          enum: [M, E, S, I]
-          example: "M"
-        value:
-          type: string
-          example: "data_baru_diubah"
+        state: { type: string, enum: [M, E, S, I], example: "M" }
+        value: { type: string, example: "data_baru_diubah" }
+
+    CacheStatusExample:
+      type: object
+      properties:
+        node_id: { type: string, example: "cache-node-1" }
+        type: { type: string, example: "cache_node" }
+        cache_size: { type: integer, example: 5 }
+        cache_content:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/CacheEntry" }
+        metrics:
+          type: object
+          properties:
+            hits: { type: integer, example: 105 }
+            misses: { type: integer, example: 20 }
+            # ... tambahkan metrik lain
+      required: [node_id, type]
+
+# (Opsional) Tambahkan skema keamanan jika ingin lebih formal
+# securitySchemes:
+#   HTTPS:
+#     type: http
+#     scheme: basic # Atau metode lain jika ada otentikasi user
+# security:
+#   - HTTPS: [] # Terapkan ke semua endpoint

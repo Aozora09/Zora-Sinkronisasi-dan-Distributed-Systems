@@ -5,12 +5,13 @@ FROM python:3.10-slim
 WORKDIR /app
 
 # --- KUMPULKAN SEMUA INSTALASI DI SINI ---
-# Instalasi tools (ping, curl, dll.) - Pindahkan ke atas
+# Instalasi tools (ping, curl, dll.)
 RUN apt-get update && \
-    apt-get install -y iputils-ping net-tools netcat-openbsd curl && \
+    apt-get install -y iputils-ping net-tools netcat-openbsd curl openssl && \
     rm -rf /var/lib/apt/lists/*
 
 # 3. Salin file requirements (sesuai struktur proyek)
+# Asumsi requirements.txt ada di context build (../)
 COPY requirements.txt .
 
 # 4. Instal semua library Python
@@ -20,5 +21,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 5. Salin semua kode 'src' kita ke dalam folder kerja /app
 COPY src/ /app/src
 
-# 6. Perintah default (HARUS DI AKHIR)
+# 6. Salin sertifikat ke dalam image
+COPY certs /etc/ssl/certs/myapp/
+
+# 7. Perintah default (HARUS DI AKHIR)
 CMD ["python", "-m", "src.nodes.lock_manager"]
