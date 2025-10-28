@@ -76,7 +76,7 @@ async def main():
         pool = None # Inisialisasi pool ke None
         try:
             # Buat connection pool, asumsikan sukses jika tidak ada error
-            pool = redis.ConnectionPool.from_url(
+            pool = redis.asyncio.ConnectionPool.from_url(
                 f"redis://{node_name}:6379",
                 decode_responses=True,        # Otomatis decode hasil ke string
                 socket_connect_timeout=3,     # Timeout koneksi awal 3 detik
@@ -125,7 +125,7 @@ async def main():
             redis_client = None # Inisialisasi
             try:
                 # Dapatkan koneksi dari pool
-                redis_client = redis.Redis(connection_pool=redis_pools[target_node_name])
+                redis_client = redis.asyncio.Redis(connection_pool=redis_pools[target_node_name])
                 # Pastikan message_body adalah dict string:string
                 sanitized_body = {str(k): str(v) for k, v in message_body.items()}
                 message_id = await redis_client.xadd(queue_name, sanitized_body)

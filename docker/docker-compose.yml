@@ -1,26 +1,26 @@
-version: '3.8'
-
 services:
-  # --- BAGIAN A: Distributed Lock Manager (Raft) ---
+  # --- Raft Lock Manager Nodes ---
   node1:
     build:
-      context: .. # Asumsi docker-compose.yml ada di folder 'docker/'
+      context: ..
       dockerfile: docker/Dockerfile.node
     container_name: node1
     ports:
-      - "${NODE1_PORT:-8001}:${INTERNAL_PORT:-8000}" # Port internal 8000 (HTTPS)
-    env_file:
-      - ../.env # env_file relatif terhadap docker-compose.yml
+      - "8001:8000"
     environment:
-      - NODE_ID=node1
-      - PEERS=node2,node3
-      - INTERNAL_PORT=${INTERNAL_PORT:-8000}
-      - CERT_FILE=/etc/ssl/certs/myapp/node1.crt
-      - KEY_FILE=/etc/ssl/certs/myapp/node1.key
-      - CA_FILE=/etc/ssl/certs/myapp/ca.crt
+      NODE_ID: node1
+      PEERS: node2,node3
+      INTERNAL_PORT: 8000
+      CERT_FILE: /etc/ssl/certs/myapp/node1.crt
+      KEY_FILE: /etc/ssl/certs/myapp/node1.key
+      CA_FILE: /etc/ssl/certs/myapp/ca.crt
     command: python -m src.nodes.lock_manager
     networks:
-      - distributed_net # Ganti nama network jika perlu
+      - distributed_net
+    # --- TAMBAHKAN VOLUME ---
+    volumes:
+      - ../certs:/etc/ssl/certs/myapp:ro # Mount certs dari host (read-only)
+    # -----------------------
 
   node2:
     build:
@@ -28,19 +28,21 @@ services:
       dockerfile: docker/Dockerfile.node
     container_name: node2
     ports:
-      - "${NODE2_PORT:-8002}:${INTERNAL_PORT:-8000}"
-    env_file:
-      - ../.env
+      - "8002:8000"
     environment:
-      - NODE_ID=node2
-      - PEERS=node1,node3
-      - INTERNAL_PORT=${INTERNAL_PORT:-8000}
-      - CERT_FILE=/etc/ssl/certs/myapp/node2.crt
-      - KEY_FILE=/etc/ssl/certs/myapp/node2.key
-      - CA_FILE=/etc/ssl/certs/myapp/ca.crt
+      NODE_ID: node2
+      PEERS: node1,node3
+      INTERNAL_PORT: 8000
+      CERT_FILE: /etc/ssl/certs/myapp/node2.crt
+      KEY_FILE: /etc/ssl/certs/myapp/node2.key
+      CA_FILE: /etc/ssl/certs/myapp/ca.crt
     command: python -m src.nodes.lock_manager
     networks:
       - distributed_net
+    # --- TAMBAHKAN VOLUME ---
+    volumes:
+      - ../certs:/etc/ssl/certs/myapp:ro # Mount certs dari host (read-only)
+    # -----------------------
 
   node3:
     build:
@@ -48,87 +50,88 @@ services:
       dockerfile: docker/Dockerfile.node
     container_name: node3
     ports:
-      - "${NODE3_PORT:-8003}:${INTERNAL_PORT:-8000}"
-    env_file:
-      - ../.env
+      - "8003:8000"
     environment:
-      - NODE_ID=node3
-      - PEERS=node1,node2
-      - INTERNAL_PORT=${INTERNAL_PORT:-8000}
-      - CERT_FILE=/etc/ssl/certs/myapp/node3.crt
-      - KEY_FILE=/etc/ssl/certs/myapp/node3.key
-      - CA_FILE=/etc/ssl/certs/myapp/ca.crt
+      NODE_ID: node3
+      PEERS: node1,node2
+      INTERNAL_PORT: 8000
+      CERT_FILE: /etc/ssl/certs/myapp/node3.crt
+      KEY_FILE: /etc/ssl/certs/myapp/node3.key
+      CA_FILE: /etc/ssl/certs/myapp/ca.crt
     command: python -m src.nodes.lock_manager
     networks:
       - distributed_net
+    # --- TAMBAHKAN VOLUME ---
+    volumes:
+      - ../certs:/etc/ssl/certs/myapp:ro # Mount certs dari host (read-only)
+    # -----------------------
 
-  # --- BAGIAN B: Distributed Queue System ---
+  # --- Queue Node (juga perlu volume) ---
   queue-node-1:
     build:
       context: ..
       dockerfile: docker/Dockerfile.node
     container_name: queue-node-1
     ports:
-      - "${QUEUE_NODE_PORT:-9101}:${INTERNAL_PORT:-8000}"
-    env_file:
-      - ../.env
+      - "9101:8000"
     environment:
-      - NODE_ID=queue-node-1
-      - INTERNAL_PORT=${INTERNAL_PORT:-8000}
-      - REDIS_NODES=redis-1,redis-2,redis-3 # Pastikan ini ada
-      - CERT_FILE=/etc/ssl/certs/myapp/queue-node-1.crt
-      - KEY_FILE=/etc/ssl/certs/myapp/queue-node-1.key
-      - CA_FILE=/etc/ssl/certs/myapp/ca.crt
+      NODE_ID: queue-node-1
+      INTERNAL_PORT: 8000
+      REDIS_NODES: redis-1,redis-2,redis-3
+      CERT_FILE: /etc/ssl/certs/myapp/queue-node-1.crt
+      KEY_FILE: /etc/ssl/certs/myapp/queue-node-1.key
+      CA_FILE: /etc/ssl/certs/myapp/ca.crt
     command: python -m src.nodes.queue_node
     networks:
       - distributed_net
-    depends_on: # Pastikan Redis siap sebelum queue node mulai
+    depends_on:
       - redis-1
       - redis-2
       - redis-3
+    # --- TAMBAHKAN VOLUME ---
+    volumes:
+      - ../certs:/etc/ssl/certs/myapp:ro # Mount certs dari host (read-only)
+    # -----------------------
 
-  # --- Redis Nodes (Bagian B) ---
+  # --- Redis ---
   redis-1:
-    image: "redis:7-alpine"
+    image: redis:7-alpine
     container_name: redis-1
-    command: redis-server --port 6379
     networks:
       - distributed_net
-
   redis-2:
-    image: "redis:7-alpine"
+    image: redis:7-alpine
     container_name: redis-2
-    command: redis-server --port 6379
     networks:
       - distributed_net
-
   redis-3:
-    image: "redis:7-alpine"
+    image: redis:7-alpine
     container_name: redis-3
-    command: redis-server --port 6379
     networks:
       - distributed_net
 
-  # --- BAGIAN C: Distributed Cache Coherence ---
+  # --- Cache Nodes (juga perlu volume) ---
   cache-node-1:
     build:
       context: ..
       dockerfile: docker/Dockerfile.node
     container_name: cache-node-1
     ports:
-      - "${CACHE1_PORT:-10001}:${INTERNAL_PORT:-8000}"
-    env_file:
-      - ../.env
+      - "10001:8000"
     environment:
-      - NODE_ID=cache-node-1
-      - INTERNAL_PORT=${INTERNAL_PORT:-8000}
-      - PEERS=cache-node-2,cache-node-3
-      - CERT_FILE=/etc/ssl/certs/myapp/cache-node-1.crt
-      - KEY_FILE=/etc/ssl/certs/myapp/cache-node-1.key
-      - CA_FILE=/etc/ssl/certs/myapp/ca.crt
+      NODE_ID: cache-node-1
+      PEERS: cache-node-2,cache-node-3
+      INTERNAL_PORT: 8000
+      CERT_FILE: /etc/ssl/certs/myapp/cache-node-1.crt
+      KEY_FILE: /etc/ssl/certs/myapp/cache-node-1.key
+      CA_FILE: /etc/ssl/certs/myapp/ca.crt
     command: python -m src.nodes.cache_node
     networks:
       - distributed_net
+    # --- TAMBAHKAN VOLUME ---
+    volumes:
+      - ../certs:/etc/ssl/certs/myapp:ro # Mount certs dari host (read-only)
+    # -----------------------
 
   cache-node-2:
     build:
@@ -136,19 +139,21 @@ services:
       dockerfile: docker/Dockerfile.node
     container_name: cache-node-2
     ports:
-      - "${CACHE2_PORT:-10002}:${INTERNAL_PORT:-8000}"
-    env_file:
-      - ../.env
+      - "10002:8000"
     environment:
-      - NODE_ID=cache-node-2
-      - INTERNAL_PORT=${INTERNAL_PORT:-8000}
-      - PEERS=cache-node-1,cache-node-3
-      - CERT_FILE=/etc/ssl/certs/myapp/cache-node-2.crt
-      - KEY_FILE=/etc/ssl/certs/myapp/cache-node-2.key
-      - CA_FILE=/etc/ssl/certs/myapp/ca.crt
+      NODE_ID: cache-node-2
+      PEERS: cache-node-1,cache-node-3
+      INTERNAL_PORT: 8000
+      CERT_FILE: /etc/ssl/certs/myapp/cache-node-2.crt
+      KEY_FILE: /etc/ssl/certs/myapp/cache-node-2.key
+      CA_FILE: /etc/ssl/certs/myapp/ca.crt
     command: python -m src.nodes.cache_node
     networks:
       - distributed_net
+    # --- TAMBAHKAN VOLUME ---
+    volumes:
+      - ../certs:/etc/ssl/certs/myapp:ro # Mount certs dari host (read-only)
+    # -----------------------
 
   cache-node-3:
     build:
@@ -156,21 +161,22 @@ services:
       dockerfile: docker/Dockerfile.node
     container_name: cache-node-3
     ports:
-      - "${CACHE3_PORT:-10003}:${INTERNAL_PORT:-8000}"
-    env_file:
-      - ../.env
+      - "10003:8000"
     environment:
-      - NODE_ID=cache-node-3
-      - INTERNAL_PORT=${INTERNAL_PORT:-8000}
-      - PEERS=cache-node-1,cache-node-2
-      - CERT_FILE=/etc/ssl/certs/myapp/cache-node-3.crt
-      - KEY_FILE=/etc/ssl/certs/myapp/cache-node-3.key
-      - CA_FILE=/etc/ssl/certs/myapp/ca.crt
+      NODE_ID: cache-node-3
+      PEERS: cache-node-1,cache-node-2
+      INTERNAL_PORT: 8000
+      CERT_FILE: /etc/ssl/certs/myapp/cache-node-3.crt
+      KEY_FILE: /etc/ssl/certs/myapp/cache-node-3.key
+      CA_FILE: /etc/ssl/certs/myapp/ca.crt
     command: python -m src.nodes.cache_node
     networks:
       - distributed_net
+    # --- TAMBAHKAN VOLUME ---
+    volumes:
+      - ../certs:/etc/ssl/certs/myapp:ro # Mount certs dari host (read-only)
+    # -----------------------
 
 networks:
-  distributed_net: # Ganti nama jika Anda menggunakan nama lain
+  distributed_net:
     driver: bridge
-

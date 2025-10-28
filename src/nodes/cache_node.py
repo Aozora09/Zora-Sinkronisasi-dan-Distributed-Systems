@@ -7,7 +7,7 @@ import ssl # <-- Tambah import ssl
 import json # <-- Import json
 import time
 import uuid # <-- Import uuid
-from aiohttp import web, ClientSession, ClientResponse, TCPConnector # <-- TCPConnector
+from aiohttp import web, ClientSession, TCPConnector # <-- TCPConnector
 import aiohttp
 from aiohttp_retry import RetryClient, ExponentialRetry
 from collections import OrderedDict
@@ -46,64 +46,68 @@ class LruCache:
     def read(self, key: str) -> dict | None:
         """Membaca data dari cache. Mengembalikan data jika valid (E, M, S)."""
         logger.info(f"Membaca '{key}' dari cache lokal...")
-        data = self._get(key)
+        data = self._get(key) # _get akan update LRU jika HIT
 
         if data is None or data['state'] == 'I':
             log_state = data.get('state') if data else 'None'
             logger.info(f"Cache MISS lokal untuk '{key}' (State: {log_state})")
             self.metrics_misses += 1
-            return None
+            return None # Jangan kembalikan data jika I atau tidak ada
 
         logger.info(f"Cache HIT lokal untuk '{key}'. State: {data['state']}, Value: {data['value']}")
         self.metrics_hits += 1
-        return data
+        return data # Kembalikan data valid (E, M, S)
 
     def write(self, key: str, value: Any) -> dict:
         """Menulis data ke cache. Selalu set state ke 'Modified'."""
         logger.info(f"Menulis '{key}' = {value} ke cache lokal...")
 
+        # Cek kapasitas SEBELUM menambahkan key baru
         if key not in self.cache and len(self.cache) >= self.capacity:
-            old_key, _ = self.cache.popitem(last=False)
-            logger.info(f"Cache penuh. Mengeluarkan LRU: '{old_key}'")
+            old_key, evicted_data = self.cache.popitem(last=False) # Hapus yang paling lama (LRU)
+            logger.info(f"Cache penuh. Mengeluarkan LRU: '{old_key}' (State: {evicted_data.get('state')})")
+            # TODO: Jika evicted_data state M, perlu write-back ke memori? Tergantung desain.
 
         new_data = {'state': 'M', 'value': value}
         self.cache[key] = new_data
-        self.cache.move_to_end(key)
+        self.cache.move_to_end(key) # Pastikan key yg baru ditulis jadi MRU
         logger.info(f"Cache WRITE lokal untuk '{key}'. State diatur ke 'Modified'")
         return new_data
 
     def invalidate(self, key: str):
         """Menerima sinyal invalidate. Set state ke 'Invalid'."""
-        # Gunakan _get agar LRU terupdate jika dibaca setelah invalidate (opsional)
-        data = self._get(key)
-        if data and data['state'] != 'I':
-            logger.info(f"INVALIDATE diterima untuk '{key}'. State: {data['state']} -> 'Invalid'.")
-            data['state'] = 'I'
-            self.metrics_invalidations_received += 1
-        elif data and data['state'] == 'I':
-             logger.debug(f"INVALIDATE diterima untuk '{key}', state sudah 'Invalid'.")
+        # JANGAN gunakan _get() agar tidak mengubah urutan LRU hanya karena invalidate
+        if key in self.cache:
+            data = self.cache[key]
+            if data['state'] != 'I':
+                 logger.info(f"INVALIDATE diterima untuk '{key}'. State: {data['state']} -> 'Invalid'.")
+                 data['state'] = 'I'
+                 self.metrics_invalidations_received += 1
+            else:
+                 logger.debug(f"INVALIDATE diterima untuk '{key}', state sudah 'Invalid'.")
         else:
-             logger.debug(f"INVALIDATE diterima untuk '{key}', tapi key tidak ada di cache.")
+            logger.debug(f"INVALIDATE diterima untuk '{key}', tapi key tidak ada di cache.")
 
 
     def share(self, key: str) -> dict | None:
         """Menerima sinyal BusRd. Jika state M/E, ubah ke S dan kembalikan data."""
+        # Gunakan _get() agar LRU terupdate jika dibaca via bus
         data = self._get(key)
         if data and data['state'] in ('M', 'E'):
             old_state = data['state']
-            data['state'] = 'S'
+            data['state'] = 'S' # Ubah ke Shared
             self.metrics_bus_reads_served += 1
             logger.info(f"SHARE (BusRd response) untuk '{key}'. State: {old_state} -> 'Shared'. Mengirim data.")
-            return data # Kembalikan data dengan state baru
+            return data # Kembalikan data dengan state baru 'S'
         elif data and data['state'] == 'S':
-            # Jika sudah S, cukup kembalikan data (tidak perlu log state change)
+            # Jika sudah S, cukup kembalikan data (LRU sudah diupdate oleh _get)
             self.metrics_bus_reads_served += 1
             logger.debug(f"SHARE (BusRd response) untuk '{key}'. State sudah 'Shared'. Mengirim data.")
             return data
         elif data and data['state'] == 'I':
              logger.warning(f"SHARE (BusRd response) ditolak untuk '{key}'. State 'Invalid'.")
              return None # Jangan kirim data jika Invalid
-        else:
+        else: # data is None (key tidak ada)
              logger.warning(f"SHARE (BusRd response) ditolak untuk '{key}'. Key tidak ditemukan.")
              return None # Key tidak ada
 
@@ -119,28 +123,53 @@ async def main():
     key_file = os.getenv("KEY_FILE")
     ca_file = os.getenv("CA_FILE")
 
-    peers = [peer for peer in peers_env.split(",") if peer]
-    cache = LruCache(capacity=10) # Ambil kapasitas dari Env Var? Misal: int(os.getenv("CACHE_CAPACITY", 10))
+    peers = [peer.strip() for peer in peers_env.split(",") if peer.strip()]
+    cache = LruCache(capacity=int(os.getenv("CACHE_CAPACITY", 10)))
 
     # --- Konfigurasi SSL Context untuk Client (Bus) ---
     ssl_context_client = None
     use_https_client = False
-    if ca_file:
+    connector = None # Deklarasi di sini
+
+    if ca_file and os.path.exists(ca_file): # Pastikan CA file ada
         try:
             ssl_context_client = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=ca_file)
             # Jika ingin mTLS client->server (cache node lain):
             # if cert_file and key_file:
             #     ssl_context_client.load_cert_chain(certfile=cert_file, keyfile=key_file)
-            logger.info(f"SSL Context client (bus) dibuat, CA: {ca_file}")
+
+            # --- !!! PERBAIKAN HOSTNAME MISMATCH !!! ---
+            # Nonaktifkan pemeriksaan hostname karena CN cert = 'localhost'
+            # tapi kita terhubung ke 'cache-node-X' (nama service docker).
+            ssl_context_client.check_hostname = False
+            # ---------------------------------------------
+
+            logger.info(f"SSL Context client (bus) dibuat, CA: {ca_file}, Hostname Check: OFF")
             use_https_client = True
+            # --- Pindahkan pembuatan connector KE SINI ---
+            connector = TCPConnector(ssl=ssl_context_client)
+            # -----------------------------------------
+
         except Exception as e:
             logger.error(f"Gagal membuat SSL Context client: {e}. Bus akan pakai HTTP.")
+    elif ca_file and not os.path.exists(ca_file):
+        logger.error(f"CA_FILE client diset tapi file tidak ditemukan: {ca_file}. Bus akan pakai HTTP.")
     else:
         logger.warning("CA_FILE tidak diset untuk client bus. Komunikasi bus akan menggunakan HTTP.")
 
-    connector = TCPConnector(ssl=ssl_context_client if use_https_client else None)
-    client_session = ClientSession(connector=connector)
+    # Buat connector tanpa SSL jika tidak pakai HTTPS
+    if not use_https_client:
+        connector = TCPConnector(ssl=None) # Eksplisit ssl=None untuk HTTP
     # --- Akhir Konfigurasi SSL Client ---
+
+    # Pastikan connector dibuat
+    if connector is None:
+        # Jika ca_file ada tapi gagal load, connector bisa jadi None. Fallback ke HTTP.
+        logger.error("Gagal membuat TCPConnector untuk bus (kemungkinan SSL error), fallback ke HTTP.")
+        connector = TCPConnector(ssl=None)
+        use_https_client = False
+
+    client_session = ClientSession(connector=connector)
 
     retry_options = ExponentialRetry(attempts=3, start_timeout=0.2)
     http_client = RetryClient(client_session, retry_options=retry_options)
@@ -161,8 +190,9 @@ async def main():
                 else:
                     logger.warning(f"Gagal invalidate {peer} untuk '{key}', status: {response.status}")
                     return False
+        except ssl.SSLCertVerificationError as e: logger.error(f"SSL Cert Verify Error saat invalidate ke {peer} ({url}): {e}")
         except ssl.SSLError as e: logger.error(f"SSL Error saat invalidate ke {peer} ({url}): {e}")
-        except aiohttp.ClientConnectorCertificateError as e: logger.error(f"Certificate Error saat invalidate ke {peer} ({url}): {e}")
+        except aiohttp.ClientConnectorCertificateError as e: logger.error(f"Connector Cert Error saat invalidate ke {peer} ({url}): {e}")
         except aiohttp.ClientConnectorError as e: logger.warning(f"Connection Error saat invalidate ke {peer} ({url}): {e}")
         except asyncio.TimeoutError: logger.warning(f"Timeout saat invalidate ke {peer} ({url})")
         except Exception as e: logger.error(f"Exception saat invalidate {peer} untuk '{key}' ({url}): {e}", exc_info=False) # Jangan terlalu verbose
@@ -173,7 +203,7 @@ async def main():
         logger.info(f"[{node_id}] Menyiarkan INVALIDATE untuk '{key}' ke {peers}")
         cache.metrics_invalidations_sent += len(peers)
         tasks = [asyncio.create_task(send_invalidate_to_peer(peer, key)) for peer in peers]
-        if tasks: await asyncio.gather(*tasks) # Tunggu semua selesai
+        if tasks: await asyncio.gather(*tasks, return_exceptions=True) # Tunggu semua selesai
 
     async def send_read_to_peer(peer, key) -> dict | None:
         """Helper coroutine untuk mengirim 1 BusRd. Return data jika ditemukan."""
@@ -187,8 +217,9 @@ async def main():
                 elif response.status != 404:
                      logger.warning(f"Gagal bus read dari {peer} untuk '{key}', status: {response.status}")
                 return None
+        except ssl.SSLCertVerificationError as e: logger.error(f"SSL Cert Verify Error saat bus read ke {peer} ({url}): {e}")
         except ssl.SSLError as e: logger.error(f"SSL Error saat bus read ke {peer} ({url}): {e}")
-        except aiohttp.ClientConnectorCertificateError as e: logger.error(f"Certificate Error saat bus read ke {peer} ({url}): {e}")
+        except aiohttp.ClientConnectorCertificateError as e: logger.error(f"Connector Cert Error saat bus read ke {peer} ({url}): {e}")
         except aiohttp.ClientConnectorError as e: logger.warning(f"Connection Error saat bus read ke {peer} ({url}): {e}")
         except asyncio.TimeoutError: logger.warning(f"Timeout saat bus read ke {peer} ({url})")
         except Exception as e: logger.error(f"Exception saat bus read dari {peer} untuk '{key}' ({url}): {e}", exc_info=False)
@@ -201,26 +232,42 @@ async def main():
         tasks = [asyncio.create_task(send_read_to_peer(peer, key)) for peer in peers]
         if not tasks: return None
 
-        # Tunggu hasil pertama yang valid (non-None)
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         data_found = None
-        for task in done:
-            try:
-                result = task.result()
-                if result and result.get('value') is not None:
-                    peer_state = result.get('state', 'Unknown')
-                    logger.info(f"READ HIT dari rekan via BusRd. State rekan: {peer_state}, Value: {result['value']}")
-                    # Set state lokal ke Shared
-                    cache.cache[key] = {'state': 'S', 'value': result['value']}
-                    cache.cache.move_to_end(key) # Update LRU
-                    data_found = cache.cache[key]
-                    break # Ambil hasil pertama saja
-            except Exception as e:
-                 logger.warning(f"Error saat memproses hasil BusRd: {e}") # Harusnya tidak terjadi
+        # Tunggu semua task selesai agar kita bisa membatalkan yg pending
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Batalkan task yang belum selesai
-        for task in pending: task.cancel()
-        if pending: await asyncio.gather(*pending, return_exceptions=True) # Tunggu pembatalan
+        for result in results:
+             if isinstance(result, Exception):
+                 # Error sudah dicatat di send_read_to_peer
+                 continue
+             if result and result.get('value') is not None: # Pastikan ada value
+                 peer_state = result.get('state', 'Unknown')
+                 logger.info(f"READ HIT dari rekan via BusRd. State rekan: {peer_state}, Value: {result['value']}")
+
+                 # --- Logika Update State Lokal Saat BusRd HIT ---
+                 local_data = cache.cache.get(key)
+                 # Jika key belum ada atau state I, tambahkan/update ke S
+                 if local_data is None or local_data['state'] == 'I':
+                     if key not in cache.cache and len(cache.cache) >= cache.capacity:
+                          old_k, _ = cache.cache.popitem(last=False)
+                          logger.info(f"Cache penuh saat BusRd HIT. Mengeluarkan LRU: '{old_k}'")
+                     cache.cache[key] = {'state': 'S', 'value': result['value']}
+                     cache.cache.move_to_end(key) # Update LRU
+                     logger.info(f"Data '{key}' ditulis ke cache lokal dari BusRd. State: S")
+                 # Jika state lokal sudah valid (E/M/S), pastikan value sama (opsional)
+                 # Dan pastikan state diubah ke S jika sebelumnya E/M (meski share() harusnya sudah handle)
+                 elif local_data['state'] in ('E', 'M'):
+                      local_data['state'] = 'S' # Pastikan jadi S
+                      local_data['value'] = result['value'] # Update value jika perlu
+                      cache.cache.move_to_end(key) # Update LRU
+                      logger.info(f"State '{key}' diubah ke S setelah BusRd HIT.")
+                 # Jika state lokal sudah S, value harusnya sama, cukup update LRU
+                 elif local_data['state'] == 'S':
+                     cache.cache.move_to_end(key) # Update LRU
+
+                 data_found = cache.cache[key] # Ambil data terbaru dari cache lokal
+                 # -----------------------------------------------
+                 break # Ambil hasil pertama saja
 
         if data_found: return data_found
 
@@ -233,11 +280,21 @@ async def main():
         peer_ip = request.remote or "unknown"
         logger.info(f"Menerima READ request dari {peer_ip} untuk key '{key}'") # Audit Log
         data = cache.read(key) # read() sudah punya log HIT/MISS internal
-        if data: return web.json_response(data)
+
+        # Jika HIT lokal dan state valid (E/M/S)
+        if data:
+            return web.json_response(data)
+
+        # Jika MISS lokal (None atau state I) -> broadcast read
         data_from_peer = await broadcast_read(key)
-        if data_from_peer: return web.json_response(data_from_peer)
+        if data_from_peer:
+            # broadcast_read sudah update cache lokal ke state S
+            return web.json_response(data_from_peer)
+
+        # Jika MISS GLOBAL -> Fetch dari 'memori utama' (simulasi)
         logger.info(f"CACHE MISS GLOBAL untuk '{key}'. Mensimulasikan fetch dari memori utama.") # Audit Log
         new_value = f"data_dari_memori_untuk_{key}_{int(time.time())}"
+        # Tulis ke cache lokal dengan state Exclusive (E) karena kita satu-satunya yg punya
         if key not in cache.cache and len(cache.cache) >= cache.capacity:
             old_k, _ = cache.cache.popitem(last=False); logger.info(f"Cache penuh saat fetch memori. Mengeluarkan LRU: '{old_k}'")
         cache.cache[key] = {'state': 'E', 'value': new_value}
@@ -256,15 +313,20 @@ async def main():
             if value is None:
                 logger.warning(f"Bad request WRITE dari {peer_ip} untuk '{key}': 'value' tidak ada.") # Audit Log
                 return web.json_response({"error": "Butuh 'value'"}, status=400)
-            await broadcast_invalidate(key) # Siarkan invalidate SEBELUM menulis
-            written_data = cache.write(key, value) # Tulis lokal (write() sudah punya log)
+
+            # --- Logika MESI: Broadcast Invalidate SEBELUM menulis lokal ---
+            await broadcast_invalidate(key)
+            # ------------------------------------------------------------
+
+            written_data = cache.write(key, value) # Tulis lokal (write() set state ke M)
             return web.json_response(written_data)
+
         except json.JSONDecodeError:
              logger.warning(f"Bad request WRITE dari {peer_ip} untuk '{key}': Invalid JSON")
              return web.json_response({"error": "Invalid JSON body"}, status=400)
         except Exception as e:
-            logger.error(f"Error di handle_write dari {peer_ip} untuk '{key}' = '{value}': {e}", exc_info=True) # Log Error
-            return web.json_response({"error": "Internal server error"}, status=500)
+             logger.error(f"Error di handle_write dari {peer_ip} untuk '{key}' = '{value}': {e}", exc_info=True) # Log Error
+             return web.json_response({"error": "Internal server error"}, status=500)
 
     # --- Handler Internal untuk Bus ---
     async def handle_bus_invalidate(request):
@@ -278,16 +340,19 @@ async def main():
         key = request.match_info.get('key')
         peer_ip = request.remote or "unknown"
         logger.info(f"Menerima BUS READ (BusRd) dari {peer_ip} untuk key '{key}'") # Audit Log Bus
-        data = cache.share(key) # share() sudah punya log internal jika state berubah
-        if data: return web.json_response(data)
+        data = cache.share(key) # share() handle state change (M/E -> S) dan update LRU
+        if data:
+            return web.json_response(data)
         else:
+            # share() return None jika key tidak ada atau state I
             logger.warning(f"BUS READ MISS dari {peer_ip} untuk '{key}' (data tidak ada atau Invalid)") # Audit Log Bus Miss
             return web.json_response({"error": "not_found_or_invalid"}, status=404)
 
     async def handle_status(request):
          peer_ip = request.remote or "unknown"
          logger.debug(f"Menerima /status request dari {peer_ip}") # Log level debug
-         json_safe_cache = {k: v for k, v in cache.cache.items()} # OrderedDict aman untuk JSON
+         # Konversi OrderedDict dan set ke format JSON-safe
+         json_safe_cache = {k: v for k, v in cache.cache.items()}
          hit_ratio = 0.0
          total_reads = cache.metrics_hits + cache.metrics_misses
          if total_reads > 0: hit_ratio = (cache.metrics_hits / total_reads) * 100
@@ -314,12 +379,12 @@ async def main():
     # --- Konfigurasi SSL Context untuk Server ---
     ssl_context_server = None
     use_https_server = False
-    if cert_file and key_file:
+    if cert_file and key_file and os.path.exists(cert_file) and os.path.exists(key_file):
         try:
             ssl_context_server = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH) # Server tidak perlu client auth di mode ini
             ssl_context_server.load_cert_chain(certfile=cert_file, keyfile=key_file)
             # Opsi mTLS:
-            # if ca_file:
+            # if ca_file and os.path.exists(ca_file):
             #     ssl_context_server.load_verify_locations(cafile=ca_file)
             #     ssl_context_server.verify_mode = ssl.CERT_REQUIRED
             logger.info(f"SSL Context server (cache) dibuat. Cert: {cert_file}")
@@ -327,7 +392,7 @@ async def main():
         except Exception as e:
             logger.error(f"Gagal membuat SSL Context server: {e}. Cache server berjalan di HTTP.")
     else:
-        logger.warning("CERT_FILE/KEY_FILE tidak diset. Cache server berjalan di HTTP.")
+        logger.warning(f"CERT_FILE/KEY_FILE tidak diset atau tidak ditemukan. Cache server berjalan di HTTP.")
     # --- Akhir Konfigurasi SSL Server ---
 
     runner = web.AppRunner(app)
@@ -363,15 +428,25 @@ if __name__ == "__main__":
         # Handle KeyboardInterrupt dengan lebih baik
         loop = asyncio.get_event_loop()
         main_task = loop.create_task(main())
+
+        # Tambahkan signal handler untuk SIGINT (Ctrl+C) dan SIGTERM
+        # Agar bisa shutdown dengan rapi
+        # loop.add_signal_handler(signal.SIGINT, lambda: main_task.cancel())
+        # loop.add_signal_handler(signal.SIGTERM, lambda: main_task.cancel())
+
         loop.run_until_complete(main_task)
     except KeyboardInterrupt:
         logging.info("Menerima KeyboardInterrupt, memulai shutdown...")
+        # Jika loop masih berjalan, cancel task utama
+        # if not main_task.done():
+        #     main_task.cancel()
+        #     # Beri waktu untuk cleanup
+        #     loop.run_until_complete(main_task)
     except Exception as e:
         logging.critical(f"Critical error in cache_node main: {e}", exc_info=True)
     finally:
          # Pastikan loop event ditutup
          loop = asyncio.get_event_loop()
          if loop.is_running():
-              loop.stop()
+             loop.stop()
          # loop.close() # Hindari jika akan run lagi
-
