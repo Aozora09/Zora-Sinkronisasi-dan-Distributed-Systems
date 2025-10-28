@@ -22,7 +22,7 @@ Dokumentasi teknis lengkap dan laporan performa dapat ditemukan di dalam folder 
 * **[Laporan Analisis Performa (report.pdf)](report_11221019_Azhari_Rambe.pdf)**
     * Laporan PDF yang berisi *gambar diagram*, *benchmark* performa `locust`, membandingkan *throughput* dan *latency* dari skenario *single-node* vs. *distributed 3-node*.
  
-* **[Link Youtube Video (klik)](http://https://youtu.be/ITxsfpPtZD8)**
+* **[Link Youtube Video (klik)]([http://https://youtu.be/ITxsfpPtZD8](http://https//youtu.be/ITxsfpPtZD8))**
     *video dokumentasi*.
 
 ---
